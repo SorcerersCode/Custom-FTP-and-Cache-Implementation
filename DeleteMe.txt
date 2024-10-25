@@ -1,0 +1,9 @@
+Note: 
+
+If you recieve a request from a client for a file you do not have, send back a file size of -1
+
+Otherwise if you do have the file, calculate the size of the file and send it back.
+
+
+File requests from the get method will contain the string: 
+"Request: " + fileName
