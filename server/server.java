@@ -1,21 +1,25 @@
 package server;
 
 import java.io.BufferedInputStream;
-import java.io.DataInput;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
-import java.io.FileNotFoundException;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.net.DatagramSocket;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Paths;
+
+import snw.snw_transport;
 
 public class server {
 
+    private static final String SERVER_DIRECTORY = "../server_fl";
     private static ServerSocket serverSocket = null;
 
-    public static void main(String args[]) {
+    public static void main(String args[]) throws InterruptedException {
 
         int serverPortNumber = Integer.parseInt(args[0]);
 
@@ -30,20 +34,13 @@ public class server {
         // we want to find what protocol is being used.
         boolean usingSNW = false;
         boolean usingTCP = false;
-        if (args[1].toLowerCase().equals("tcp")) {
+        if (args[1].equalsIgnoreCase("tcp")) {
             usingTCP = true;
-        } else if (args[1].toLowerCase().equals("snw")) {
+        } else if (args[1].equalsIgnoreCase("snw")) {
             usingSNW = true;
         } else {
             System.out.println("Error: Incorrect protocol entered\nMust be either TCP or SNW");
             return;
-        }
-
-        System.out.println("Server Port Number: " + serverPortNumber);
-        if (usingTCP == true) {
-            System.out.println("\nProtocol: TCP");
-        } else {
-            System.out.println("\nProtocol: SNW");
         }
 
         /*
@@ -51,75 +48,129 @@ public class server {
          */
 
         try {
+            if (usingTCP) {
+                // Starts up server side listening connection
+                serverSocket = new ServerSocket(serverPortNumber);
 
-            // Starts up server side listening connection
-            serverSocket = new ServerSocket(serverPortNumber);
-            System.out.println("Server is started...");
-            System.out.println("Waiting for incoming connections...");
+                while (true) {
 
-            while (true) {
+                    // Helps manage our "live" connection with the client to send and recieve data
+                    Socket socket = serverSocket.accept();
 
-                // Helps manage our "live" connection with the client to send and recieve data
-                Socket socket = serverSocket.accept();
+                    // Creates a listening/sending stream from our current running socket connection
+                    DataInputStream incomingData = new DataInputStream(
+                            new BufferedInputStream(socket.getInputStream()));
+                    DataOutputStream outgoingData = new DataOutputStream(socket.getOutputStream());
 
-                System.out.println("Client accepted");
+                    // The first thing sent to us by the client is the file name
+                    String fileName = incomingData.readUTF();
 
-                // Creates a listening/sending stream from our current running socket connection
-                DataInputStream incomingData = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
-                DataOutputStream messageStream = new DataOutputStream(socket.getOutputStream());
+                    // Clears out any previous command operations that were performed
+                    String command = null;
+                    // Next is the operation we will be performing (either upload or download a
+                    // file)
+                    command = incomingData.readUTF();
 
-                // The first thing sent to us by the client is the file name
-                String fileName = incomingData.readUTF();
+                    // Creates file and file path so we can check if it exists already
+                    File requestedFile = Paths.get(SERVER_DIRECTORY, fileName).toFile();
 
-                //System.out.println("Receiving file: " + fileName);
+                    if (command.equalsIgnoreCase("upload")) {
+                        // Read the file size from the client
+                        long fileSize = incomingData.readLong();
 
-                // Now we create the file with the proper file name in the designated server_fl
-                // directory
-                File outputFile = new File("../server_fl", fileName);
+                        try (FileOutputStream fileStream = new FileOutputStream(requestedFile)) {
+                            byte[] buffer = new byte[4096];
+                            int bytesRead;
+                            long totalBytesRead = 0;
+                            while (totalBytesRead < fileSize && (bytesRead = incomingData.read(buffer)) != -1) {
+                                fileStream.write(buffer, 0, bytesRead);
+                                totalBytesRead += bytesRead;
+                            }
+                        }
 
-                // Read the file size from the client
-                long fileSize = incomingData.readLong();
+                        // Sends the success message to the client
+                        outgoingData.writeUTF("File successfully uploaded.");
 
+                        // Command 'get' indicates file download, check to see if we have the file
+                    } else if (command.equalsIgnoreCase("download")) {
+                        if (requestedFile.exists()) {
+                            // Commence with the file download proccess to the cache following tcp_transport
+                            // Client is waiting for the file size, so we calulate it and send it
+                            outgoingData.writeUTF(String.valueOf(requestedFile.length()));
 
-                //System.out.println("File created and placed in directory...");
-                //System.out.println("File Location: " + outputFile.getAbsolutePath());
-                //System.out.println("File Name: " + outputFile.getName());
-                //System.out.println("File size: " + fileSize);
+                            // Open the file so we can stream it's contents over connection
+                            FileInputStream fileStream = new FileInputStream(requestedFile);
 
-                // Allows us to write to the newly created file
-                FileOutputStream outgoingData = new FileOutputStream(outputFile);
+                            // Send over the contents of the file
+                            byte[] buffer = new byte[4096];
+                            int bytesRead;
+                            long totalBytesSent = 0;
+                            while (totalBytesSent < requestedFile.length()
+                                    && (bytesRead = fileStream.read(buffer)) != -1) {
+                                outgoingData.write(buffer, 0, bytesRead);
+                                totalBytesSent += bytesRead;
+                            }
 
-                // Reads the incoming data from our stream and writes it to our new file
-                long totalBytesRead = 0;
-                byte[] buffer = new byte[4096];
-                int bytesRead;
-                while (totalBytesRead < fileSize && (bytesRead = incomingData.read(buffer, 0, (int) Math.min(buffer.length, fileSize - totalBytesRead))) != -1) {
-                    outgoingData.write(buffer, 0, bytesRead);
-                    totalBytesRead += bytesRead;
+                            // Tells the recieving end that all data was transmitted
+                            outgoingData.flush();
+
+                            // Send a message letting client know we sent file from cache
+                            outgoingData.writeUTF("File delivered from server.");
+
+                            // To make sure the file message is received by client before closing connection
+                            Thread.sleep(100);
+
+                            // Close all streams for maintence
+                            fileStream.close();
+                            incomingData.close();
+                            outgoingData.close();
+
+                        } else {
+                            // -1 Indicates to tcp instance that file does not exist
+                            outgoingData.writeUTF("-1");
+                        }
+                    }
+
+                    // Maintence to close off all out communications
+                    socket.close();
                 }
+            } else if (usingSNW) {
+                DatagramSocket udpSocket = new DatagramSocket(serverPortNumber);
 
-                //System.out.println("File written to, now closing...");
-                
-                // Needed before continuing to send a message back
-                outgoingData.close();
-                
-                //System.out.println("Sending message back to client...");
+                // Initialize the transport receiver
+                snw_transport snwReceiver = new snw_transport(udpSocket);
 
-                // Sends the success message to the client to alert them
-                messageStream.writeUTF("File successfully uploaded");
+                while (true) {
 
-                messageStream.flush();
+                    // To prevent the udp from timing out while trying to listen
+                    udpSocket.setSoTimeout(0);
 
-                //System.out.println("Message sent");
+                    // Receiving file name initiates the file upload
+                    String fileName = snwReceiver.receiveFileName();
 
-                // Maintence to close off all out communications
-                incomingData.close();
-                messageStream.close();
-                socket.close();
+                    if (fileName == null) {
+                        System.out.println("Failed to receive file name. Terminating.");
+                        continue;
+                    }
+
+                    // Receive the file length
+                    long expectedLength = snwReceiver.receiveFileLength();
+                    if (expectedLength < 0) {
+                        System.out.println("Failed to receive file length. Terminating.");
+                        continue;
+                    }
+
+                    // Receive the file data
+                    File receivedFile = new File(SERVER_DIRECTORY, fileName);
+                    if (!snwReceiver.receiveFileData(receivedFile, expectedLength)) {
+                        System.out.println("Failed to receive the file data properly.");
+                    }
+                }
             }
-
         } catch (IOException e) {
-            System.out.println("Server File Recieve Error: \n" + e.getMessage());
+            System.out.println("Server File Recieve Error: " + e.getMessage());
+            System.out.println("More Detail: ");
+            e.printStackTrace();
         } finally {
             try {
                 if (serverSocket != null) {

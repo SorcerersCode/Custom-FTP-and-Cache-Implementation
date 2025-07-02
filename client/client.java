@@ -1,14 +1,19 @@
 package client;
+
 import tcp.tcp_transport;
+import snw.snw_transport;
 import client.client;
-import server.server;
 import java.io.File;
+import java.io.IOException;
 import java.net.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Scanner;
 
 public class client {
 
-    public static void main(String args[]) {
+    public static void main(String args[]) throws IOException {
 
         // Resolves the IP addresses and catch any initialization errors
         InetAddress serverIpAddress = null;
@@ -44,75 +49,130 @@ public class client {
             return;
         }
 
+        // Sets up the variables that will be used each input cycle
         Scanner keyboard = new Scanner(System.in);
         String userInput = null;
         String userCommand = null;
         String userFile = null;
-        do{
+
+        do {
             System.out.print("Enter Command: ");
             userInput = keyboard.nextLine();
 
             // Parse user input for the command and file path
             String[] userInputParts = userInput.split(" ", 2);
-
-            // Assign the variables
             userCommand = userInputParts[0];
-            
+
             // Used in case the user inputs only one word/command
-            if(userInputParts.length == 2){
+            // Prevents IndexOutOfBounds error for quit command
+            if (userInputParts.length == 2) {
                 userFile = userInputParts[1];
             }
 
-            if(userCommand.toLowerCase().equals("put")){
+            if (userCommand.equalsIgnoreCase("put")) {
 
+                // Regardless of protocol we are using, we will be uploading a file
+                // This sets that variable up for that accordingly
                 File file = new File(userFile);
 
-                //System.out.println("File Absolute Path: " + file.getAbsolutePath())
-                //System.out.println("Now creating tcp_transport instance...");
-                
-                // Create the connection needed to upload file to server
-                tcp_transport serverFileTransport = new tcp_transport(serverIpAddress, serverPortNumber);
+                if (usingTCP) {
+                    // File uploads only go from client directly to server
+                    // That's why we use only the server as the target port and IP
+                    tcp_transport serverFileTransport = new tcp_transport(serverIpAddress, serverPortNumber);
 
-                //System.out.println("tcp_transport instance made");
-                //System.out.println("Now attempting to upload file with method");
+                    serverFileTransport.upload(file);
 
-                serverFileTransport.upload(file);
+                } else if (usingSNW) {
 
-            } else if (userCommand.toLowerCase().equals("get")){
+                    // File uploads only go from client directly to server
+                    // That's why we use only the server as the target port and IP
+                    snw_transport serverFileTransport = new snw_transport(serverIpAddress, serverPortNumber);
 
+                    serverFileTransport.upload(file);
+
+                    // The FIN message was already sent so it would be messy to send more data after
+                    // Instead we print out to console if it reaches this line
+                    System.out.println("File successfully uploaded.");
+                }
+
+                // Handles file downloads for both TCP and SNW instances
+            } else if (userCommand.equalsIgnoreCase("get")) {
+
+                // Regardless of protocol we are using, we will be uploading a file
+                // This sets that variable up for that accordingly
                 File requestedFile = new File(userFile);
-                
-                // Request file from Cache first
-                tcp_transport cacheFileRequest = new tcp_transport(cacheIpAddress, cachePortNumber);
 
-                // Get the file from the cache/server
-                File fileReturned = cacheFileRequest.get(requestedFile);
+                if (usingTCP) {
+                    // Request file from Cache
+                    tcp_transport cacheFileRequest = new tcp_transport(cacheIpAddress, cachePortNumber);
 
-                if(fileReturned == null){
-                    System.out.println("Error: File not found on either cache nor server");
-                    return;
+                    // Get the file from the cache/server
+                    File fileReturned = cacheFileRequest.download(requestedFile);
+
+                    if (fileReturned != null) {
+                        MoveFileToDirectory(fileReturned, "../client_fl");
+                    } else {
+                        System.out.println("Error: File does not exist on either cache nor server");
+                    }
+                } else if (usingSNW) {
+
+                    System.out.println("Now entered the SNW protocol...");
+
+                    // Create snw_transport instance
+                    snw_transport cacheFileRequest = new snw_transport(cacheIpAddress, cachePortNumber);
+
+                    System.out.println("snw isntance made...");
+
+                    // Send over name of file
+                    cacheFileRequest.sendFileName(requestedFile.getName());
+
+                    System.out.println("File name sent over...");
+
+                    // Set up a listener mechanism that waits for length
+                    long fileLength = cacheFileRequest.receiveFileLength();
+
+                    System.out.println("File length received...");
+
+                    // Once you get the length, wait/receive the data
+                    cacheFileRequest.receiveFileData(requestedFile, fileLength);
+
+                    System.out.println("File received from cache...");
+
                 }
 
             } else {
-                if(!userCommand.toLowerCase().equals("quit")){
+                if (!userCommand.toLowerCase().equals("quit")) {
                     System.out.println("Error: Invalid command or format\nShould be <command> <filePath>");
                 }
-                
+
             }
 
-        } while(!userCommand.equals("quit"));
+        } while (!userCommand.equalsIgnoreCase("quit"));
 
         keyboard.close();
         System.out.println("Exiting Program!");
     }
-}
 
-// System.out.println("Server IP Address: " + args[0]);
-// System.out.println("Server Port Number: " + serverPortNumber);
-// System.out.println("\nCache IP Address: " + args[2]);
-// System.out.println("Cache Port Number: " + cachePortNumber);
-// if(usingTCP == true){
-// System.out.println("\nProtocol: TCP");
-// } else {
-// System.out.println("\nProtocol: SNW");
-// }
+    private static void MoveFileToDirectory(File fileToMove, String targetDirectory) {
+
+        File targetDir = new File(targetDirectory);
+
+        // Create redundancy for file directory
+        if (!targetDir.exists()) {
+            targetDir.mkdirs();
+        }
+
+        // Define the path to move the file to within the target directory
+        Path targetPath = new File(targetDir, fileToMove.getName()).toPath();
+
+        try {
+            // Moves the file to the directory (overwrites if it already exists)
+            Files.move(fileToMove.toPath(), targetPath, StandardCopyOption.REPLACE_EXISTING);
+
+            // System.out.println("File moved to directory: " + targetPath);
+        } catch (IOException e) {
+            System.out.println("Error moving file: " + e.getMessage());
+        }
+    }
+
+}
